@@ -7,7 +7,8 @@ import os
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-exchange = ccxt.binance()
+# CHANGE EXCHANGE HERE
+exchange = ccxt.okx()
 
 coins = [
     'BTC/USDT',
