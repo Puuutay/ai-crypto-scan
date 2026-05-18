@@ -11,6 +11,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 SYMBOLS = [
+
     "BTC",
     "ETH",
     "BNB",
@@ -23,90 +24,35 @@ SYMBOLS = [
     "LINK",
     "MATIC",
     "LTC",
-    "BCH",
     "ATOM",
-    "ETC",
-    "XLM",
     "UNI",
     "FIL",
     "APT",
     "ARB",
     "OP",
     "INJ",
-    "RNDR",
-    "AAVE",
     "NEAR",
     "FTM",
     "ALGO",
-    "SAND",
-    "MANA",
-    "GRT",
-    "EGLD",
-    "FLOW",
     "ICP",
-    "XTZ",
     "SHIB",
     "PEPE",
-    "FLOKI",
-    "BONK",
     "WIF",
-    "BOME",
-    "MEME",
-    "TURBO",
-    "DOG",
-    "BRETT",
-    "MOG",
-    "POPCAT",
+    "BONK",
     "TAO",
     "FET",
-    "AGIX",
-    "OCEAN",
-    "WLD",
-    "ARKM",
-    "NMR",
-    "PHB",
-    "RLC",
     "IMX",
-    "BEAM",
     "GALA",
-    "AXS",
-    "ENJ",
-    "ILV",
-    "YGG",
     "MKR",
-    "SNX",
-    "DYDX",
-    "CRV",
-    "LDO",
-    "SUSHI",
-    "COMP",
-    "1INCH",
+    "AAVE",
     "SUI",
     "SEI",
     "TIA",
     "JUP",
     "PYTH",
-    "STRK",
-    "BLUR",
-    "ZRO",
-    "AEVO",
-    "ALT",
-    "PORTAL",
-    "MANTA",
-    "DYM",
-    "OMNI",
-    "PIXEL",
-    "ETHFI",
-    "REZ",
-    "NOT",
     "TON",
-    "ONDO",
-    "TRB",
-    "HOOK",
-    "ORDI",
-    "SATS",
-    "1000PEPE",
-    "1000BONK",
+    "ONDO"
+
 ]
 
 # =====================================
@@ -149,7 +95,17 @@ def get_price_data(symbol):
 
     data = response.json()
 
+    # SAFE CHECK
+    if "Data" not in data:
+        raise Exception("No Data")
+
+    if "Data" not in data["Data"]:
+        raise Exception("Invalid Candle Data")
+
     candles = data["Data"]["Data"]
+
+    if len(candles) < 50:
+        raise Exception("Not Enough Candles")
 
     closes = [
         float(x["close"])
@@ -521,11 +477,12 @@ def analyze():
 
         except Exception as e:
 
-            print(
-                f"ERROR {symbol}: {e}"
-            )
+            print(f"ERROR {symbol}: {e}")
 
+    # =====================================
     # NO SETUP
+    # =====================================
+
     if not best_setup:
 
         report = """
@@ -549,12 +506,47 @@ Weak market conditions
 
         return
 
+    # =====================================
     # EXECUTION
+    # =====================================
+
     zones = execution_zones(
         best_setup["price"],
         best_setup["volatility"],
         best_setup["signal"]
     )
+
+    # SAFE CHECK
+    if zones is None:
+
+        report = f"""
+━━━━━━━━━━━━━━━━━━
+⚠️ MARKET STATUS
+━━━━━━━━━━━━━━━━━━
+
+No executable setup found.
+
+Best Symbol:
+{best_setup['symbol']}USDT
+
+Signal:
+{best_setup['signal']}
+
+Consensus:
+{best_setup['consensus']}%
+
+━━━━━━━━━━━━━━━━━━
+"""
+
+        print(report)
+
+        send_telegram(report)
+
+        return
+
+    # =====================================
+    # FINAL REPORT
+    # =====================================
 
     report = f"""
 ━━━━━━━━━━━━━━━━━━
