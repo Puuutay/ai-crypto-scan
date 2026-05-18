@@ -10,8 +10,8 @@ from datetime import datetime
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SYMBOL = "BTCUSDT"
-INTERVAL = "15"
+SYMBOL = "BTC"
+TIMEFRAME = "minute"
 
 # =====================================
 # TELEGRAM
@@ -29,34 +29,41 @@ def send_telegram(message):
     requests.post(url, data=payload)
 
 # =====================================
-# GET MARKET DATA (BYBIT)
+# GET MARKET DATA
 # =====================================
 
 def get_price_data():
 
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
     url = (
-        "https://api.bybit.com/v5/market/kline"
-        f"?category=linear&symbol={SYMBOL}&interval={INTERVAL}&limit=100"
+        "https://min-api.cryptocompare.com/data/v2/histominute"
+        "?fsym=BTC"
+        "&tsym=USDT"
+        "&limit=100"
     )
 
-    response = requests.get(url)
+    response = requests.get(
+        url,
+        headers=headers,
+        timeout=15
+    )
 
     data = response.json()
 
-    candles = data["result"]["list"]
+    candles = data["Data"]["Data"]
 
     closes = [
-        float(x[4])
+        float(x["close"])
         for x in candles
     ]
 
     volumes = [
-        float(x[5])
+        float(x["volumeto"])
         for x in candles
     ]
-
-    closes.reverse()
-    volumes.reverse()
 
     return closes, volumes
 
@@ -101,7 +108,9 @@ def momentum_score(closes):
     latest = closes[-1]
     old = closes[-10]
 
-    momentum = ((latest - old) / old) * 100
+    momentum = (
+        (latest - old) / old
+    ) * 100
 
     return round(momentum, 2)
 
@@ -141,7 +150,10 @@ def liquidity_alignment(volumes):
 
 def momentum_alignment(momentum):
 
-    score = min(abs(momentum) * 30, 100)
+    score = min(
+        abs(momentum) * 30,
+        100
+    )
 
     return round(score, 2)
 
@@ -151,7 +163,10 @@ def momentum_alignment(momentum):
 
 def risk_stability(volatility):
 
-    score = max(100 - (volatility * 10), 1)
+    score = max(
+        100 - (volatility * 10),
+        1
+    )
 
     return round(score, 2)
 
@@ -343,7 +358,8 @@ def execution_zones(
         return None
 
     rr = round(
-        abs(tp2 - current_price) /
+        abs(tp2 - current_price)
+        /
         abs(current_price - stop_loss),
         2
     )
@@ -483,7 +499,7 @@ Trade Status:
 ━━━━━━━━━━━━━━━━━━
 
 🪙 Symbol:
-{SYMBOL}
+BTCUSDT
 
 💰 Current Price:
 {price}
