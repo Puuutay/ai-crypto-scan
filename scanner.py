@@ -95,12 +95,11 @@ def get_price_data(symbol):
 
     data = response.json()
 
-    # SAFE CHECK
     if "Data" not in data:
         raise Exception("No Data")
 
     if "Data" not in data["Data"]:
-        raise Exception("Invalid Candle Data")
+        raise Exception("Invalid Data")
 
     candles = data["Data"]["Data"]
 
@@ -219,7 +218,7 @@ def momentum_alignment(momentum):
 def risk_stability(volatility):
 
     score = max(
-        100 - (volatility * 10),
+        100 - (volatility * 5),
         1
     )
 
@@ -237,9 +236,9 @@ def consensus_engine(
 ):
 
     score = (
-        trend * 0.30 +
+        trend * 0.25 +
         liquidity * 0.20 +
-        momentum * 0.20 +
+        momentum * 0.25 +
         risk * 0.30
     )
 
@@ -255,10 +254,10 @@ def signal_conflict(
     risk
 ):
 
-    if risk < 40:
+    if risk < 20:
         return "HIGH"
 
-    elif trend < 50 or momentum < 50:
+    elif trend < 25 or momentum < 25:
         return "MODERATE"
 
     return "LOW"
@@ -273,10 +272,10 @@ def no_trade_filter(
     conflict
 ):
 
-    if volatility > 6:
+    if volatility > 12:
         return True
 
-    if consensus < 50:
+    if consensus < 35:
         return True
 
     if conflict == "HIGH":
@@ -297,18 +296,22 @@ def signal_engine(
     if (
         "TRENDING" in regime
         and momentum > 0
-        and consensus >= 55
+        and consensus >= 40
     ):
         return "BUY 🚀"
 
     elif (
         "BEARISH" in regime
         and momentum < 0
-        and consensus >= 55
+        and consensus >= 40
     ):
         return "SELL 🩸"
 
-    return "NO TRADE ⚠️"
+    # FALLBACK
+    if momentum > 0:
+        return "BUY 🚀"
+
+    return "SELL 🩸"
 
 # =====================================
 # EXECUTION ZONES
@@ -324,15 +327,18 @@ def execution_zones(
         volatility / 100
     )
 
+    if move <= 0:
+        move = current_price * 0.01
+
     if "BUY" in signal:
 
         entry_low = round(
-            current_price * 0.998,
+            current_price * 0.997,
             2
         )
 
         entry_high = round(
-            current_price * 1.001,
+            current_price * 1.002,
             2
         )
 
@@ -351,15 +357,15 @@ def execution_zones(
             2
         )
 
-    elif "SELL" in signal:
+    else:
 
         entry_low = round(
-            current_price * 0.999,
+            current_price * 0.998,
             2
         )
 
         entry_high = round(
-            current_price * 1.002,
+            current_price * 1.003,
             2
         )
 
@@ -378,13 +384,10 @@ def execution_zones(
             2
         )
 
-    else:
-        return None
-
     rr = round(
         abs(tp2 - current_price)
         /
-        abs(current_price - stop_loss),
+        max(abs(current_price - stop_loss), 1),
         2
     )
 
@@ -444,12 +447,6 @@ def analyze():
                 risk_score
             )
 
-            signal = signal_engine(
-                regime,
-                momentum,
-                consensus
-            )
-
             blocked = no_trade_filter(
                 volatility,
                 consensus,
@@ -458,6 +455,12 @@ def analyze():
 
             if blocked:
                 continue
+
+            signal = signal_engine(
+                regime,
+                momentum,
+                consensus
+            )
 
             if (
                 best_setup is None
@@ -472,7 +475,8 @@ def analyze():
                     "consensus": consensus,
                     "momentum": momentum,
                     "volatility": volatility,
-                    "regime": regime
+                    "regime": regime,
+                    "risk": risk_score
                 }
 
         except Exception as e:
@@ -490,13 +494,9 @@ def analyze():
 ⚠️ MARKET STATUS
 ━━━━━━━━━━━━━━━━━━
 
-No high-quality setup found.
+No valid setup found.
 
-Trade Permission:
-DENIED ❌
-
-Reason:
-Weak market conditions
+Market conditions weak.
 ━━━━━━━━━━━━━━━━━━
 """
 
@@ -515,34 +515,6 @@ Weak market conditions
         best_setup["volatility"],
         best_setup["signal"]
     )
-
-    # SAFE CHECK
-    if zones is None:
-
-        report = f"""
-━━━━━━━━━━━━━━━━━━
-⚠️ MARKET STATUS
-━━━━━━━━━━━━━━━━━━
-
-No executable setup found.
-
-Best Symbol:
-{best_setup['symbol']}USDT
-
-Signal:
-{best_setup['signal']}
-
-Consensus:
-{best_setup['consensus']}%
-
-━━━━━━━━━━━━━━━━━━
-"""
-
-        print(report)
-
-        send_telegram(report)
-
-        return
 
     # =====================================
     # FINAL REPORT
@@ -596,6 +568,9 @@ Momentum:
 
 Volatility:
 {best_setup['volatility']}%
+
+Risk Stability:
+{best_setup['risk']}%
 
 ━━━━━━━━━━━━━━━━━━
 🕒 Time
