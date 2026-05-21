@@ -17,10 +17,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # =====================================
-# EXCHANGE
+# EXCHANGE — BITGET
 # =====================================
 
-exchange = ccxt.okx({
+exchange = ccxt.bitget({
     "enableRateLimit": True,
     "options": {
         "defaultType": "swap"
@@ -31,21 +31,12 @@ exchange = ccxt.okx({
 # SETTINGS
 # =====================================
 
-TIMEFRAME = "15m"
-
 MIN_RR = 2.0
-
 SIGNAL_COOLDOWN_HOURS = 12
-
 COOLDOWN_FILE = "last_signal_times.json"
 
-# ROC threshold — lowered from 0.5 to 0.2
-ROC_THRESHOLD = 0.2
-
 # =====================================
-# ALL COINS
-# FET → AGIX/USDT:USDT (OKX alternative)
-# RNDR → RENDER/USDT:USDT (OKX alternative)
+# ALL COINS (Bitget Futures format)
 # =====================================
 
 ALL_SYMBOLS = [
@@ -65,8 +56,8 @@ ALL_SYMBOLS = [
     "BONK/USDT:USDT",
 
     # AI
-    "AGIX/USDT:USDT",       # FET not on OKX swap
-    "RENDER/USDT:USDT",     # RNDR renamed to RENDER
+    "FET/USDT:USDT",
+    "RENDER/USDT:USDT",
     "TAO/USDT:USDT",
     "WLD/USDT:USDT",
     "ARKM/USDT:USDT",
@@ -103,10 +94,7 @@ def load_signal_times():
 
 
 def save_signal_times(signal_times):
-    raw = {
-        k: v.isoformat()
-        for k, v in signal_times.items()
-    }
+    raw = {k: v.isoformat() for k, v in signal_times.items()}
     with open(COOLDOWN_FILE, "w") as f:
         json.dump(raw, f, indent=2)
 
@@ -121,21 +109,13 @@ def is_on_cooldown(symbol, signal_times, now):
 # LOAD DATA
 # =====================================
 
-def load_ohlcv(symbol, timeframe="15m", limit=60):
-
-    ohlcv = exchange.fetch_ohlcv(
-        symbol,
-        timeframe=timeframe,
-        limit=limit
-    )
-
+def load_ohlcv(symbol, timeframe, limit=100):
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     df = pd.DataFrame(
         ohlcv,
         columns=["timestamp", "open", "high", "low", "close", "volume"]
     )
-
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-
     return df
 
 # =====================================
@@ -157,6 +137,12 @@ def apply_indicators(df):
     rs = avg_gain / avg_loss
     df["rsi"] = 100 - (100 / (1 + rs))
 
+    # MACD
+    ema_12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema_26 = df["close"].ewm(span=26, adjust=False).mean()
+    df["macd"] = ema_12 - ema_26
+    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+
     # ATR
     hl = df["high"] - df["low"]
     hc = (df["high"] - df["close"].shift()).abs()
@@ -164,88 +150,79 @@ def apply_indicators(df):
     tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
     df["atr"] = tr.ewm(com=13, adjust=False).mean()
 
-    # ROC
-    df["roc"] = df["close"].pct_change(periods=5) * 100
+    # Volume
+    df["vol_ma"]  = df["volume"].rolling(20).mean()
+    df["rel_vol"] = df["volume"] / df["vol_ma"]
 
     return df
 
 # =====================================
-# MARKET REGIME
+# 1H TREND CHECK
 # =====================================
 
-def detect_market_regime(df):
+def check_1h_trend(symbol):
+    df = load_ohlcv(symbol, "1h", limit=60)
+    df = apply_indicators(df)
 
-    atr = df["atr"].iloc[-1]
-    price = df["close"].iloc[-1]
-    atr_percent = (atr / price) * 100
     ema20 = df["ema_20"].iloc[-1]
     ema50 = df["ema_50"].iloc[-1]
-
-    if atr_percent < 0.3:
-        return "dead_market"
-    if abs(ema20 - ema50) < price * 0.001:
-        return "ranging"
-    if atr_percent > 3:
-        return "volatile"
-
-    return "trending"
-
-# =====================================
-# ANALYSIS
-# =====================================
-
-def analyze_trend(df):
-    ema20 = df["ema_20"].iloc[-1]
-    ema50 = df["ema_50"].iloc[-1]
-    direction = "bullish" if ema20 > ema50 else "bearish"
-    return {"direction": direction}
-
-
-def analyze_momentum(df):
-    roc = df["roc"].iloc[-1]
-    rsi = df["rsi"].iloc[-1]
-    return {
-        "roc": round(roc, 2),
-        "rsi": round(rsi, 2),
-        "strong": abs(roc) > ROC_THRESHOLD   # 0.2 instead of 0.5
-    }
-
-
-def analyze_volatility(df):
-    atr = df["atr"].iloc[-1]
     price = df["close"].iloc[-1]
-    volatility = (atr / price) * 100
-    return {
-        "volatility_percent": round(volatility, 2),
-        "active": volatility >= 0.3           # lowered from 0.5 to 0.3
-    }
 
+    if ema20 > ema50 and price > ema20:
+        return "bullish"
 
-def analyze_volume(df):
-    current_volume = df["volume"].iloc[-1]
-    average_volume = df["volume"].rolling(20).mean().iloc[-1]
-    relative_volume = current_volume / average_volume
-    return {
-        "relative_volume": round(relative_volume, 2),
-        "strong_volume": relative_volume >= 0.8   # lowered from 1.0 to 0.8
-    }
+    if ema20 < ema50 and price < ema20:
+        return "bearish"
+
+    return None
 
 # =====================================
-# FILTER
+# 15M ENTRY CHECK
 # =====================================
 
-def should_skip_trade(momentum, volatility, volume, regime):
+def check_15m_entry(symbol, direction):
+    df = load_ohlcv(symbol, "15m", limit=60)
+    df = apply_indicators(df)
 
-    if not momentum["strong"]:
-        return True, "Weak momentum"
-    if not volatility["active"]:
-        return True, "Low volatility"
-    if not volume["strong_volume"]:
-        return True, "Weak volume"
-    if regime == "dead_market":
-        return True, "Dead market"
+    ema20    = df["ema_20"].iloc[-1]
+    ema50    = df["ema_50"].iloc[-1]
+    rsi      = df["rsi"].iloc[-1]
+    macd     = df["macd"].iloc[-1]
+    macd_sig = df["macd_signal"].iloc[-1]
+    rel_vol  = df["rel_vol"].iloc[-1]
+    price    = df["close"].iloc[-1]
+    atr      = df["atr"].iloc[-1]
 
-    return False, "Valid"
+    details = {
+        "price":   round(price, 4),
+        "rsi":     round(rsi, 2),
+        "macd":    round(macd, 6),
+        "rel_vol": round(rel_vol, 2),
+        "atr":     round(atr, 6),
+    }
+
+    if direction == "bullish":
+        ema_ok  = ema20 > ema50
+        rsi_ok  = 45 <= rsi <= 70
+        macd_ok = macd > macd_sig
+        vol_ok  = rel_vol >= 0.8
+
+    else:
+        ema_ok  = ema20 < ema50
+        rsi_ok  = 30 <= rsi <= 55
+        macd_ok = macd < macd_sig
+        vol_ok  = rel_vol >= 0.8
+
+    details["checks"] = {
+        "ema_aligned": ema_ok,
+        "rsi_ok":      rsi_ok,
+        "macd_ok":     macd_ok,
+        "volume_ok":   vol_ok,
+    }
+
+    valid = ema_ok and rsi_ok and macd_ok and vol_ok
+
+    return valid, details
 
 # =====================================
 # RISK MANAGER
@@ -256,17 +233,17 @@ def calculate_trade_levels(price, atr, direction):
     sl_distance = atr * 1.5
 
     if direction == "bullish":
-        stop_loss = price - sl_distance
+        stop_loss   = price - sl_distance
         take_profit = price + (sl_distance * MIN_RR)
     else:
-        stop_loss = price + sl_distance
+        stop_loss   = price + sl_distance
         take_profit = price - (sl_distance * MIN_RR)
 
     return {
-        "entry": round(price, 4),
-        "stop_loss": round(stop_loss, 4),
+        "entry":       round(price, 4),
+        "stop_loss":   round(stop_loss, 4),
         "take_profit": round(take_profit, 4),
-        "rr": MIN_RR
+        "rr":          MIN_RR
     }
 
 # =====================================
@@ -297,67 +274,69 @@ def send_telegram_alert(message):
 
 def scan_all():
 
-    signal_times = load_signal_times()
+    signal_times  = load_signal_times()
     signals_found = 0
-    now = datetime.utcnow()
+    now           = datetime.utcnow()
 
-    print(f"\n[{now}] Scanning {len(ALL_SYMBOLS)} coins...\n")
+    print(f"\n[{now}] Scanning {len(ALL_SYMBOLS)} coins on Bitget...\n")
 
     for symbol in ALL_SYMBOLS:
 
         try:
 
+            # Check cooldown
             if is_on_cooldown(symbol, signal_times, now):
                 last = signal_times[symbol]
                 remaining = last + timedelta(hours=SIGNAL_COOLDOWN_HOURS) - now
-                hrs = int(remaining.total_seconds() // 3600)
+                hrs  = int(remaining.total_seconds() // 3600)
                 mins = int((remaining.total_seconds() % 3600) // 60)
                 print(f"  COOLDOWN {symbol}: {hrs}h {mins}m left")
                 continue
 
-            df = load_ohlcv(symbol, TIMEFRAME)
+            # Step 1: 1H Trend
+            trend_1h = check_1h_trend(symbol)
 
-            if len(df) < 55:
-                print(f"  SKIP {symbol}: not enough data")
+            if trend_1h is None:
+                print(f"  SKIP {symbol}: 1H trend unclear")
                 continue
 
-            df = apply_indicators(df)
+            print(f"  {symbol}: 1H = {trend_1h.upper()} → checking 15M...")
 
-            regime = detect_market_regime(df)
-            trend = analyze_trend(df)
-            momentum = analyze_momentum(df)
-            volatility = analyze_volatility(df)
-            volume = analyze_volume(df)
+            # Step 2: 15M Entry
+            valid, details = check_15m_entry(symbol, trend_1h)
 
-            skip, reason = should_skip_trade(
-                momentum, volatility, volume, regime
+            if not valid:
+                checks = details["checks"]
+                failed = [k for k, v in checks.items() if not v]
+                print(f"  SKIP {symbol}: 15M failed → {failed}")
+                continue
+
+            # All checks passed
+            signal_type = "LONG" if trend_1h == "bullish" else "SHORT"
+
+            levels = calculate_trade_levels(
+                details["price"],
+                details["atr"],
+                trend_1h
             )
 
-            if skip:
-                print(f"  SKIP {symbol}: {reason}")
-                continue
-
-            price = df["close"].iloc[-1]
-            atr = df["atr"].iloc[-1]
-
-            levels = calculate_trade_levels(price, atr, trend["direction"])
-
-            signal_type = "LONG" if trend["direction"] == "bullish" else "SHORT"
+            checks = details["checks"]
 
             message = (
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"🏆 CLEAN MARKET SIGNAL\n"
+                f"🏆 HIGH QUALITY SIGNAL\n"
                 f"━━━━━━━━━━━━━━━━━━\n\n"
                 f"🪙 Symbol: {symbol}\n"
-                f"📢 Signal: {signal_type}\n\n"
+                f"📢 Signal: {signal_type}\n"
+                f"🏦 Exchange: Bitget Futures\n\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"📊 Market Analysis\n"
+                f"📊 Multi-Timeframe Analysis\n"
                 f"━━━━━━━━━━━━━━━━━━\n\n"
-                f"📈 Regime: {regime}\n"
-                f"Momentum ROC: {momentum['roc']}%\n"
-                f"RSI: {momentum['rsi']}\n"
-                f"Volatility: {volatility['volatility_percent']}%\n"
-                f"Relative Volume: {volume['relative_volume']}\n\n"
+                f"⏰ 1H Trend: {trend_1h.upper()} ✅\n"
+                f"📈 15M EMA Aligned: {'✅' if checks['ema_aligned'] else '❌'}\n"
+                f"💨 RSI: {details['rsi']} {'✅' if checks['rsi_ok'] else '❌'}\n"
+                f"⚡ MACD: {'✅' if checks['macd_ok'] else '❌'}\n"
+                f"📦 Volume: {details['rel_vol']}x {'✅' if checks['volume_ok'] else '❌'}\n\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"🎯 Trade Execution\n"
                 f"━━━━━━━━━━━━━━━━━━\n\n"
