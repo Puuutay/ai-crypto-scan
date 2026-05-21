@@ -3,6 +3,7 @@ import json
 import requests
 import ccxt
 import pandas as pd
+import xml.etree.ElementTree as ET
 
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
@@ -14,7 +15,7 @@ from datetime import datetime, timedelta
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+CHAT_ID   = os.getenv("CHAT_ID")
 
 # =====================================
 # EXCHANGE — BITGET
@@ -31,12 +32,36 @@ exchange = ccxt.bitget({
 # SETTINGS
 # =====================================
 
-MIN_RR = 2.0
+MIN_RR                = 2.0
 SIGNAL_COOLDOWN_HOURS = 12
-COOLDOWN_FILE = "last_signal_times.json"
+COOLDOWN_FILE         = "last_signal_times.json"
+MIN_SCORE             = 6   # minimum out of 8
 
 # =====================================
-# ALL COINS (Bitget Futures format)
+# NEWS SOURCES (free RSS)
+# =====================================
+
+RSS_FEEDS = [
+    "https://cointelegraph.com/rss",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+]
+
+POSITIVE_WORDS = [
+    "surge", "rally", "bullish", "soars", "jumps",
+    "gains", "rises", "pump", "breakout", "ath",
+    "all-time high", "buy", "adoption", "upgrade",
+    "partnership", "launch", "growth", "record"
+]
+
+NEGATIVE_WORDS = [
+    "crash", "dump", "bearish", "plunge", "drops",
+    "falls", "sell", "fear", "hack", "ban", "lawsuit",
+    "sec", "fine", "warning", "risk", "collapse",
+    "exploit", "scam", "fraud", "loss", "down"
+]
+
+# =====================================
+# ALL COINS
 # =====================================
 
 ALL_SYMBOLS = [
@@ -106,7 +131,7 @@ def is_on_cooldown(symbol, signal_times, now):
     return (now - last_time) < timedelta(hours=SIGNAL_COOLDOWN_HOURS)
 
 # =====================================
-# LOAD DATA
+# LOAD OHLCV
 # =====================================
 
 def load_ohlcv(symbol, timeframe, limit=100):
@@ -119,7 +144,7 @@ def load_ohlcv(symbol, timeframe, limit=100):
     return df
 
 # =====================================
-# INDICATORS (pure pandas)
+# INDICATORS
 # =====================================
 
 def apply_indicators(df):
@@ -129,25 +154,25 @@ def apply_indicators(df):
     df["ema_50"] = df["close"].ewm(span=50, adjust=False).mean()
 
     # RSI
-    delta = df["close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    delta    = df["close"].diff()
+    gain     = delta.clip(lower=0)
+    loss     = -delta.clip(upper=0)
     avg_gain = gain.ewm(com=13, adjust=False).mean()
     avg_loss = loss.ewm(com=13, adjust=False).mean()
-    rs = avg_gain / avg_loss
+    rs       = avg_gain / avg_loss
     df["rsi"] = 100 - (100 / (1 + rs))
 
     # MACD
-    ema_12 = df["close"].ewm(span=12, adjust=False).mean()
-    ema_26 = df["close"].ewm(span=26, adjust=False).mean()
-    df["macd"] = ema_12 - ema_26
+    ema_12            = df["close"].ewm(span=12, adjust=False).mean()
+    ema_26            = df["close"].ewm(span=26, adjust=False).mean()
+    df["macd"]        = ema_12 - ema_26
     df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
 
     # ATR
-    hl = df["high"] - df["low"]
-    hc = (df["high"] - df["close"].shift()).abs()
-    lc = (df["low"] - df["close"].shift()).abs()
-    tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+    hl        = df["high"] - df["low"]
+    hc        = (df["high"] - df["close"].shift()).abs()
+    lc        = (df["low"] - df["close"].shift()).abs()
+    tr        = pd.concat([hl, hc, lc], axis=1).max(axis=1)
     df["atr"] = tr.ewm(com=13, adjust=False).mean()
 
     # Volume
@@ -157,79 +182,178 @@ def apply_indicators(df):
     return df
 
 # =====================================
-# 1H TREND CHECK
+# SCORE 1 — 1H EMA TREND (2 points)
 # =====================================
 
-def check_1h_trend(symbol):
-    df = load_ohlcv(symbol, "1h", limit=60)
-    df = apply_indicators(df)
+def score_1h_trend(symbol):
+    try:
+        df    = load_ohlcv(symbol, "1h", limit=60)
+        df    = apply_indicators(df)
+        ema20 = df["ema_20"].iloc[-1]
+        ema50 = df["ema_50"].iloc[-1]
+        price = df["close"].iloc[-1]
 
-    ema20 = df["ema_20"].iloc[-1]
-    ema50 = df["ema_50"].iloc[-1]
-    price = df["close"].iloc[-1]
+        if ema20 > ema50 and price > ema20:
+            return "bullish", 2, "1H Trend: BULLISH"
+        if ema20 < ema50 and price < ema20:
+            return "bearish", 2, "1H Trend: BEARISH"
 
-    if ema20 > ema50 and price > ema20:
-        return "bullish"
+        return None, 0, "1H Trend: UNCLEAR"
 
-    if ema20 < ema50 and price < ema20:
-        return "bearish"
-
-    return None
+    except Exception as e:
+        return None, 0, f"1H Trend: ERROR"
 
 # =====================================
-# 15M ENTRY CHECK
+# SCORE 2 — 15M EMA (1 point)
 # =====================================
 
-def check_15m_entry(symbol, direction):
-    df = load_ohlcv(symbol, "15m", limit=60)
-    df = apply_indicators(df)
+def score_15m_ema(df_15m, direction):
+    ema20 = df_15m["ema_20"].iloc[-1]
+    ema50 = df_15m["ema_50"].iloc[-1]
 
-    ema20    = df["ema_20"].iloc[-1]
-    ema50    = df["ema_50"].iloc[-1]
-    rsi      = df["rsi"].iloc[-1]
-    macd     = df["macd"].iloc[-1]
-    macd_sig = df["macd_signal"].iloc[-1]
-    rel_vol  = df["rel_vol"].iloc[-1]
-    price    = df["close"].iloc[-1]
-    atr      = df["atr"].iloc[-1]
+    if direction == "bullish" and ema20 > ema50:
+        return 1, "15M EMA: Aligned BULLISH"
+    if direction == "bearish" and ema20 < ema50:
+        return 1, "15M EMA: Aligned BEARISH"
 
-    details = {
-        "price":   round(price, 4),
-        "rsi":     round(rsi, 2),
-        "macd":    round(macd, 6),
-        "rel_vol": round(rel_vol, 2),
-        "atr":     round(atr, 6),
-    }
+    return 0, "15M EMA: Not aligned"
 
-    if direction == "bullish":
-        ema_ok  = ema20 > ema50
-        rsi_ok  = 45 <= rsi <= 70
-        macd_ok = macd > macd_sig
-        vol_ok  = rel_vol >= 0.8
+# =====================================
+# SCORE 3 — RSI (1 point)
+# =====================================
 
-    else:
-        ema_ok  = ema20 < ema50
-        rsi_ok  = 30 <= rsi <= 55
-        macd_ok = macd < macd_sig
-        vol_ok  = rel_vol >= 0.8
+def score_rsi(df_15m, direction):
+    rsi = round(df_15m["rsi"].iloc[-1], 1)
 
-    details["checks"] = {
-        "ema_aligned": ema_ok,
-        "rsi_ok":      rsi_ok,
-        "macd_ok":     macd_ok,
-        "volume_ok":   vol_ok,
-    }
+    if direction == "bullish" and 45 <= rsi <= 70:
+        return 1, f"RSI: {rsi} (healthy bullish)"
+    if direction == "bearish" and 30 <= rsi <= 55:
+        return 1, f"RSI: {rsi} (healthy bearish)"
 
-    valid = ema_ok and rsi_ok and macd_ok and vol_ok
+    return 0, f"RSI: {rsi} (out of range)"
 
-    return valid, details
+# =====================================
+# SCORE 4 — MACD (1 point)
+# =====================================
+
+def score_macd(df_15m, direction):
+    macd     = df_15m["macd"].iloc[-1]
+    macd_sig = df_15m["macd_signal"].iloc[-1]
+
+    if direction == "bullish" and macd > macd_sig:
+        return 1, "MACD: Bullish"
+    if direction == "bearish" and macd < macd_sig:
+        return 1, "MACD: Bearish"
+
+    return 0, "MACD: Against direction"
+
+# =====================================
+# SCORE 5 — VOLUME (1 point)
+# =====================================
+
+def score_volume(df_15m):
+    rel_vol = round(df_15m["rel_vol"].iloc[-1], 2)
+
+    if rel_vol >= 0.8:
+        return 1, f"Volume: {rel_vol}x (sufficient)"
+
+    return 0, f"Volume: {rel_vol}x (weak)"
+
+# =====================================
+# SCORE 6 — FUNDING RATE (1 point)
+# =====================================
+
+def score_funding_rate(symbol, direction):
+    try:
+        funding      = exchange.fetch_funding_rate(symbol)
+        funding_rate = funding.get("fundingRate", 0)
+        fr_pct       = round(funding_rate * 100, 4)
+
+        if direction == "bullish" and funding_rate > 0.001:
+            return 0, f"Funding: {fr_pct}% (overleveraged longs)"
+        if direction == "bearish" and funding_rate < -0.001:
+            return 0, f"Funding: {fr_pct}% (overleveraged shorts)"
+
+        return 1, f"Funding: {fr_pct}% (favorable)"
+
+    except:
+        return 1, "Funding: N/A (skipped)"
+
+# =====================================
+# SCORE 7 — ORDER BOOK (1 point)
+# =====================================
+
+def score_order_book(symbol, direction):
+    try:
+        ob      = exchange.fetch_order_book(symbol, limit=20)
+        bids    = ob["bids"][:10]
+        asks    = ob["asks"][:10]
+        bid_vol = sum([b[1] for b in bids])
+        ask_vol = sum([a[1] for a in asks])
+        ratio   = round(bid_vol / ask_vol if ask_vol > 0 else 1, 2)
+
+        if direction == "bullish" and bid_vol > ask_vol:
+            return 1, f"Order Book: {ratio} (buyers dominate)"
+        if direction == "bearish" and ask_vol > bid_vol:
+            return 1, f"Order Book: {ratio} (sellers dominate)"
+
+        return 0, f"Order Book: {ratio} (against direction)"
+
+    except:
+        return 1, "Order Book: N/A (skipped)"
+
+# =====================================
+# SCORE 8 — NEWS SENTIMENT via RSS (1 point)
+# =====================================
+
+def fetch_rss_headlines():
+    headlines = []
+    for url in RSS_FEEDS:
+        try:
+            resp = requests.get(url, timeout=5)
+            root = ET.fromstring(resp.content)
+            for item in root.iter("item"):
+                title = item.findtext("title") or ""
+                headlines.append(title.lower())
+        except:
+            continue
+    return headlines
+
+
+def score_news(symbol, all_headlines):
+    try:
+        coin = symbol.split("/")[0].lower()
+
+        # Filter headlines mentioning this coin
+        relevant = [h for h in all_headlines if coin in h]
+
+        if not relevant:
+            return 1, "News: No mentions (neutral)"
+
+        positive = sum(
+            1 for h in relevant
+            for w in POSITIVE_WORDS if w in h
+        )
+        negative = sum(
+            1 for h in relevant
+            for w in NEGATIVE_WORDS if w in h
+        )
+
+        if positive > negative:
+            return 1, f"News: Positive ({positive}+ vs {negative}-)"
+        if negative > positive:
+            return 0, f"News: Negative ({positive}+ vs {negative}-)"
+
+        return 1, f"News: Neutral ({positive}+ vs {negative}-)"
+
+    except:
+        return 1, "News: N/A (skipped)"
 
 # =====================================
 # RISK MANAGER
 # =====================================
 
 def calculate_trade_levels(price, atr, direction):
-
     sl_distance = atr * 1.5
 
     if direction == "bullish":
@@ -251,17 +375,12 @@ def calculate_trade_levels(price, atr, direction):
 # =====================================
 
 def send_telegram_alert(message):
-
     if not BOT_TOKEN:
         print("No BOT_TOKEN found, skipping Telegram.")
         return
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message
-    }
+    url     = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message}
 
     try:
         requests.post(url, json=payload, timeout=10)
@@ -280,63 +399,95 @@ def scan_all():
 
     print(f"\n[{now}] Scanning {len(ALL_SYMBOLS)} coins on Bitget...\n")
 
+    # Fetch RSS headlines once for all coins
+    print("  Fetching news headlines...")
+    all_headlines = fetch_rss_headlines()
+    print(f"  {len(all_headlines)} headlines loaded.\n")
+
     for symbol in ALL_SYMBOLS:
 
         try:
 
             # Check cooldown
             if is_on_cooldown(symbol, signal_times, now):
-                last = signal_times[symbol]
+                last      = signal_times[symbol]
                 remaining = last + timedelta(hours=SIGNAL_COOLDOWN_HOURS) - now
-                hrs  = int(remaining.total_seconds() // 3600)
-                mins = int((remaining.total_seconds() % 3600) // 60)
+                hrs       = int(remaining.total_seconds() // 3600)
+                mins      = int((remaining.total_seconds() % 3600) // 60)
                 print(f"  COOLDOWN {symbol}: {hrs}h {mins}m left")
                 continue
 
-            # Step 1: 1H Trend
-            trend_1h = check_1h_trend(symbol)
+            # ── SCORE 1: 1H Trend (2 pts) ──
+            direction, s1, l1 = score_1h_trend(symbol)
 
-            if trend_1h is None:
-                print(f"  SKIP {symbol}: 1H trend unclear")
+            if direction is None:
+                print(f"  SKIP {symbol}: {l1}")
                 continue
 
-            print(f"  {symbol}: 1H = {trend_1h.upper()} → checking 15M...")
+            # Load 15M data once
+            df_15m = load_ohlcv(symbol, "15m", limit=60)
+            df_15m = apply_indicators(df_15m)
 
-            # Step 2: 15M Entry
-            valid, details = check_15m_entry(symbol, trend_1h)
+            price = df_15m["close"].iloc[-1]
+            atr   = df_15m["atr"].iloc[-1]
 
-            if not valid:
-                checks = details["checks"]
-                failed = [k for k, v in checks.items() if not v]
-                print(f"  SKIP {symbol}: 15M failed → {failed}")
+            # ── SCORE 2: 15M EMA (1 pt) ──
+            s2, l2 = score_15m_ema(df_15m, direction)
+
+            # ── SCORE 3: RSI (1 pt) ──
+            s3, l3 = score_rsi(df_15m, direction)
+
+            # ── SCORE 4: MACD (1 pt) ──
+            s4, l4 = score_macd(df_15m, direction)
+
+            # ── SCORE 5: Volume (1 pt) ──
+            s5, l5 = score_volume(df_15m)
+
+            # ── SCORE 6: Funding Rate (1 pt) ──
+            s6, l6 = score_funding_rate(symbol, direction)
+
+            # ── SCORE 7: Order Book (1 pt) ──
+            s7, l7 = score_order_book(symbol, direction)
+
+            # ── SCORE 8: News Sentiment (1 pt) ──
+            s8, l8 = score_news(symbol, all_headlines)
+
+            # ── TOTAL ──
+            total_score = s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8
+            max_score   = 9
+
+            print(f"  {symbol}: {direction.upper()} Score {total_score}/{max_score}")
+
+            if total_score < MIN_SCORE:
+                print(f"  SKIP {symbol}: Score too low ({total_score}/{max_score})")
                 continue
 
-            # All checks passed
-            signal_type = "LONG" if trend_1h == "bullish" else "SHORT"
+            # ── SIGNAL CONFIRMED ──
+            signal_type = "LONG" if direction == "bullish" else "SHORT"
+            levels      = calculate_trade_levels(price, atr, direction)
 
-            levels = calculate_trade_levels(
-                details["price"],
-                details["atr"],
-                trend_1h
-            )
-
-            checks = details["checks"]
+            e = lambda s: "✅" if s >= 1 else "❌"
+            e2 = lambda s: "✅" if s == 2 else "❌"
 
             message = (
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"🏆 HIGH QUALITY SIGNAL\n"
                 f"━━━━━━━━━━━━━━━━━━\n\n"
-                f"🪙 Symbol: {symbol}\n"
+                f"🪙 {symbol}\n"
                 f"📢 Signal: {signal_type}\n"
-                f"🏦 Exchange: Bitget Futures\n\n"
+                f"🏦 Bitget Futures\n"
+                f"⭐ Score: {total_score}/{max_score}\n\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"📊 Multi-Timeframe Analysis\n"
+                f"📊 Analysis Breakdown\n"
                 f"━━━━━━━━━━━━━━━━━━\n\n"
-                f"⏰ 1H Trend: {trend_1h.upper()} ✅\n"
-                f"📈 15M EMA Aligned: {'✅' if checks['ema_aligned'] else '❌'}\n"
-                f"💨 RSI: {details['rsi']} {'✅' if checks['rsi_ok'] else '❌'}\n"
-                f"⚡ MACD: {'✅' if checks['macd_ok'] else '❌'}\n"
-                f"📦 Volume: {details['rel_vol']}x {'✅' if checks['volume_ok'] else '❌'}\n\n"
+                f"{e2(s1)} {l1} (2pts)\n"
+                f"{e(s2)} {l2}\n"
+                f"{e(s3)} {l3}\n"
+                f"{e(s4)} {l4}\n"
+                f"{e(s5)} {l5}\n"
+                f"{e(s6)} {l6}\n"
+                f"{e(s7)} {l7}\n"
+                f"{e(s8)} {l8}\n\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"🎯 Trade Execution\n"
                 f"━━━━━━━━━━━━━━━━━━\n\n"
@@ -351,7 +502,7 @@ def scan_all():
                 f"No guaranteed outcome."
             )
 
-            print(f"  ✅ SIGNAL: {symbol} → {signal_type}")
+            print(f"  ✅ SIGNAL: {symbol} → {signal_type} ({total_score}/{max_score})")
             send_telegram_alert(message)
 
             signal_times[symbol] = now
@@ -361,7 +512,6 @@ def scan_all():
             print(f"  ERROR {symbol}: {e}")
 
     save_signal_times(signal_times)
-
     print(f"\n[DONE] {signals_found} signal(s) sent.\n")
 
 
