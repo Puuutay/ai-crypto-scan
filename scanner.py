@@ -839,9 +839,7 @@ for symbol in ALL_SYMBOLS:
 
 " f"💰 Entry: {levels['entry']} " f"🛑 Stop Loss: {levels['stop_loss']} " f"🎯 Take Profit: {levels['take_profit']} " f"⚖ RR: 1:{levels['rr']} " )
 
-print(
-            f"✅ SIGNAL: {symbol} {signal}"
-        )
+print(f"✅ SIGNAL: {symbol} {signal}")
 
         print(message)
 
