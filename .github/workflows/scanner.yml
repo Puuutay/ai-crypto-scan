@@ -2,12 +2,20 @@ name: Elite Crypto Scanner
 
 on:
   schedule:
-    - cron: '*/5 7-21 * * 1-5'  # Every 5 mins, London/NY session, weekdays only
-  workflow_dispatch:              # Manual trigger anytime
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    concurrency:
+      group: elite-scanner
+      cancel-in-progress: false
+
+    env:
+      PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
@@ -16,24 +24,13 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: pip-
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Restore signal cooldown cache
-        uses: actions/cache@v4
-        with:
-          path: signal_log.csv
-          key: signal-cache-${{ github.run_id }}
-          restore-keys: signal-cache-
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Run Scanner
         run: python scanner.py
